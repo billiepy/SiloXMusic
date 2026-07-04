@@ -219,7 +219,9 @@ class YouTube:
         return None
 
     async def download_via_yt_api(self, video_id: str, filename: str, video: bool = False) -> str | None:
+        logger.warning("YT_API: keys loaded = %d", len(self.yt_api_keys.keys))
         if not self.yt_api_keys.keys:
+            logger.warning("YT_API: no keys found, skipping to yt-dlp fallback.")
             return None
 
         if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
