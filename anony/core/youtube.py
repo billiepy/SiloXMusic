@@ -18,6 +18,10 @@ from anony.helpers import Track, utils
 
 
 def _load_yt_api_keys() -> list[str]:
+    """
+    .env se YT_API_KEY_1, YT_API_KEY_2, YT_API_KEY_3 ... jitni bhi keys
+    di gayi hon, sabko uthata hai. Koi fixed limit nahi hai.
+    """
     keys = []
     idx = 1
     while True:
@@ -45,7 +49,7 @@ class YTAPIKeyManager:
                 self._idx += 1
                 if not self.exhausted[key]:
                     return key
-            return None
+            return None  # sab keys ka daily limit khatam ho gaya
 
     async def mark_exhausted(self, key: str):
         async with self._lock:
@@ -74,11 +78,12 @@ class YouTube:
             r"|playlist\?list=PL[A-Za-z0-9_-]+|[A-Za-z0-9_-]{11}))\S*"
         )
 
-        self.yt_api_url = os.environ.get("YT_API", "https://api.onegrab.fun").rstrip("/")
+        # ---- ShrutiBots third-party API (unlimited key rotation) ----
+        self.yt_api_url = os.environ.get("YT_API", "https://api.shrutibots.site").rstrip("/")
         self.yt_api_keys = YTAPIKeyManager(_load_yt_api_keys())
-        self.yt_api_max_size = 60 * 1024 * 1024
-        self.yt_api_timeout = aiohttp.ClientTimeout(total=20)
-        self.yt_api_dl_timeout = aiohttp.ClientTimeout(total=60)
+        self.yt_api_max_size = 60 * 1024 * 1024  # 60MB cap
+        self.yt_api_dl_timeout_audio = aiohttp.ClientTimeout(total=120)
+        self.yt_api_dl_timeout_video = aiohttp.ClientTimeout(total=300)
 
     def get_cookies(self):
         if not self.checked:
@@ -155,70 +160,6 @@ class YouTube:
             pass
         return tracks
 
-    async def _yt_api_resolve_track(self, youtube_url: str, want_video: bool, key: str) -> dict:
-        async with aiohttp.ClientSession(timeout=self.yt_api_timeout) as session:
-            async with session.get(
-                f"{self.yt_api_url}/api/track",
-                params={"url": youtube_url, "video": "true" if want_video else "false"},
-                headers={"X-API-Key": key},
-            ) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.warning("YT_API: /api/track returned status %s, body=%s", resp.status, body[:300])
-                    return {"_status": resp.status}
-                try:
-                    return await resp.json(content_type=None)
-                except Exception as ex:
-                    body = await resp.text()
-                    logger.warning("YT_API: /api/track invalid JSON: %s, body=%s", ex, body[:300])
-                    return {"_status": 0}
-
-    async def _yt_api_stream_file(self, file_id: str, filename: str, key: str) -> str | None:
-        tmp_filename = filename + ".part"
-        async with aiohttp.ClientSession(timeout=self.yt_api_dl_timeout) as session:
-            async with session.get(
-                f"{self.yt_api_url}/stream",
-                params={"id": file_id},
-                headers={"X-API-Key": key},
-            ) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.warning("YT_API: /stream returned status %s, body=%s", resp.status, body[:300])
-                    return None
-
-                content_type = resp.headers.get("Content-Type", "")
-                if content_type and not (
-                    content_type.startswith("audio/")
-                    or content_type.startswith("video/")
-                    or content_type == "application/octet-stream"
-                ):
-                    logger.warning("YT_API: unexpected content-type: %s", content_type)
-                    return None
-
-                content_length = resp.headers.get("Content-Length")
-                if content_length and int(content_length) > self.yt_api_max_size:
-                    logger.warning("YT_API: file too large (%s bytes), skipping.", content_length)
-                    return None
-
-                os.makedirs("downloads", exist_ok=True)
-                written = 0
-                with open(tmp_filename, "wb") as fw:
-                    async for chunk in resp.content.iter_chunked(64 * 1024):
-                        written += len(chunk)
-                        if written > self.yt_api_max_size:
-                            logger.warning("YT_API: download exceeded size cap mid-stream, aborting.")
-                            fw.close()
-                            os.remove(tmp_filename)
-                            return None
-                        fw.write(chunk)
-
-        if os.path.exists(tmp_filename) and os.path.getsize(tmp_filename) > 0:
-            os.replace(tmp_filename, filename)
-            return filename
-        if os.path.exists(tmp_filename):
-            os.remove(tmp_filename)
-        return None
-
     async def download_via_yt_api(self, video_id: str, filename: str, video: bool = False) -> str | None:
         if not self.yt_api_keys.keys:
             return None
@@ -232,40 +173,94 @@ class YouTube:
             logger.warning("YT_API: all API keys exhausted for today.")
             return None
 
-        youtube_url = self.base + video_id
+        media_type = "video" if video else "audio"
+        timeout = self.yt_api_dl_timeout_video if video else self.yt_api_dl_timeout_audio
+        tmp_filename = filename + ".part"
 
         try:
-            track = await self._yt_api_resolve_track(youtube_url, video, key)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    f"{self.yt_api_url}/download",
+                    params={"url": video_id, "type": media_type, "api_key": key},
+                ) as resp:
+                    if resp.status in (429, 403):
+                        await self.yt_api_keys.mark_exhausted(key)
+                        return await self.download_via_yt_api(video_id, filename, video)
 
-            if track.get("_status") in (429, 403):
-                await self.yt_api_keys.mark_exhausted(key)
-                return await self.download_via_yt_api(video_id, filename, video)
-            if "_status" in track:
-                logger.warning("YT_API: request failed, response: %s", track)
-                return None
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.warning(
+                            "YT_API: /download returned status %s, body=%s",
+                            resp.status, body[:300],
+                        )
+                        return None
 
-            file_id = track.get("id")
-            if not file_id:
-                logger.warning("YT_API: response mein 'id' nahi mila: %s", track)
-                return None
+                    content_type = resp.headers.get("Content-Type", "")
+                    if content_type and not (
+                        content_type.startswith("audio/")
+                        or content_type.startswith("video/")
+                        or content_type == "application/octet-stream"
+                    ):
+                        body = await resp.text()
+                        logger.warning(
+                            "YT_API: unexpected content-type %s, body=%s",
+                            content_type, body[:300],
+                        )
+                        return None
 
-            return await self._yt_api_stream_file(file_id, filename, key)
+                    content_length = resp.headers.get("Content-Length")
+                    if content_length and int(content_length) > self.yt_api_max_size:
+                        logger.warning("YT_API: file too large (%s bytes), skipping.", content_length)
+                        return None
+
+                    os.makedirs("downloads", exist_ok=True)
+                    written = 0
+                    with open(tmp_filename, "wb") as fw:
+                        async for chunk in resp.content.iter_chunked(131072):
+                            written += len(chunk)
+                            if written > self.yt_api_max_size:
+                                logger.warning("YT_API: download exceeded size cap mid-stream, aborting.")
+                                fw.close()
+                                os.remove(tmp_filename)
+                                return None
+                            fw.write(chunk)
+
+            if os.path.exists(tmp_filename) and os.path.getsize(tmp_filename) > 0:
+                os.replace(tmp_filename, filename)
+                return filename
+            if os.path.exists(tmp_filename):
+                os.remove(tmp_filename)
+            return None
         except asyncio.TimeoutError:
             logger.warning("YT_API: request timed out.")
+            if os.path.exists(tmp_filename):
+                os.remove(tmp_filename)
             return None
         except Exception as ex:
             logger.warning("YT_API download failed: %s", ex)
+            if os.path.exists(tmp_filename):
+                try:
+                    os.remove(tmp_filename)
+                except Exception:
+                    pass
             return None
 
     async def download(self, video_id: str, video: bool = False) -> str | None:
         url = self.base + video_id
-        ext = "mp4" if video else "webm"
-        filename = f"downloads/{video_id}.{ext}"
 
-        if Path(filename).exists():
-            return filename
+        # ShrutiBots audio ko mp3 deta hai, yt-dlp fallback webm deta hai —
+        # dono extensions alag cache check karte hain taaki koi conflict na ho
+        ext_api = "mp4" if video else "mp3"
+        ext_ytdlp = "mp4" if video else "webm"
+        filename_api = f"downloads/{video_id}.{ext_api}"
+        filename_ytdlp = f"downloads/{video_id}.{ext_ytdlp}"
 
-        result = await self.download_via_yt_api(video_id, filename, video)
+        if Path(filename_api).exists():
+            return filename_api
+        if Path(filename_ytdlp).exists():
+            return filename_ytdlp
+
+        result = await self.download_via_yt_api(video_id, filename_api, video)
         if result:
             return result
 
@@ -302,6 +297,7 @@ class YouTube:
                 except Exception as ex:
                     logger.warning("Download failed: %s", ex)
                     return None
-            return filename
+            return filename_ytdlp
 
         return await asyncio.to_thread(_download)
+            
