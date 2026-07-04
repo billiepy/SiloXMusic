@@ -18,11 +18,6 @@ from anony.helpers import Track, utils
 
 
 def _load_yt_api_keys() -> list[str]:
-    """
-    .env se YT_API_KEY_1, YT_API_KEY_2, YT_API_KEY_3 ... jitni bhi keys
-    di gayi hon, sabko uthata hai. Koi fixed limit nahi hai — jitni
-    keys add karoge utni hi use hongi.
-    """
     keys = []
     idx = 1
     while True:
@@ -168,10 +163,14 @@ class YouTube:
                 headers={"X-API-Key": key},
             ) as resp:
                 if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning("YT_API: /api/track returned status %s, body=%s", resp.status, body[:300])
                     return {"_status": resp.status}
                 try:
                     return await resp.json(content_type=None)
-                except Exception:
+                except Exception as ex:
+                    body = await resp.text()
+                    logger.warning("YT_API: /api/track invalid JSON: %s, body=%s", ex, body[:300])
                     return {"_status": 0}
 
     async def _yt_api_stream_file(self, file_id: str, filename: str, key: str) -> str | None:
@@ -183,6 +182,8 @@ class YouTube:
                 headers={"X-API-Key": key},
             ) as resp:
                 if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning("YT_API: /stream returned status %s, body=%s", resp.status, body[:300])
                     return None
 
                 content_type = resp.headers.get("Content-Type", "")
@@ -219,9 +220,7 @@ class YouTube:
         return None
 
     async def download_via_yt_api(self, video_id: str, filename: str, video: bool = False) -> str | None:
-        logger.warning("YT_API: keys loaded = %d", len(self.yt_api_keys.keys))
         if not self.yt_api_keys.keys:
-            logger.warning("YT_API: no keys found, skipping to yt-dlp fallback.")
             return None
 
         if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
