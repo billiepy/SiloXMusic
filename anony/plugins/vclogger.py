@@ -1,9 +1,9 @@
-# Copyright (c) 2025 AnonymousX1025
+# Copyright (c) 2026 Billiepy
 # Licensed under the MIT License.
-# This file is part of AnonXMusic
+# This file is part of SiloXMusic
 #
-# VC Logger plugin — announces jab koi voice chat mein join/leave kare.
-# Original concept reference: Silooo.
+# VC Logger plugin — announces if anyone join/leave voicechat.
+# Original concept reference: Silo.
 
 
 import asyncio
@@ -14,7 +14,8 @@ from pyrogram import filters
 from pyrogram.raw import functions
 from pyrogram.types import Message
 
-from anony import app, db, logger
+from anony import app, db, lang, logger
+from anony.helpers import admin_check
 
 
 vc_active_users: Dict[int, Set[int]] = {}
@@ -86,6 +87,8 @@ async def toggle_vc_logger(chat_id: int) -> bool:
 
 
 @app.on_message(filters.command("vclogger") & filters.group & ~app.bl_users)
+@lang.language()
+@admin_check
 async def vclogger_command(_, message: Message):
     chat_id = message.chat.id
     args = message.text.split()
@@ -162,6 +165,8 @@ async def monitor_vc_chat(chat_id):
             new_users = set()
             for p in participants_list:
                 if hasattr(p, "peer") and hasattr(p.peer, "user_id"):
+                    if p.peer.user_id == userbot_client.id:
+                        continue  # assistant khud VC me hai, use announce nahi karna
                     new_users.add(p.peer.user_id)
 
             current_users = vc_active_users.get(chat_id, set())
@@ -255,4 +260,4 @@ def to_small_caps(text):
 
 # Bot start hote hi purani enabled chats ke liye monitoring resume ho jaati hai
 asyncio.create_task(load_vc_logger_status())
-                    
+        
