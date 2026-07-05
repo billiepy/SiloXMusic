@@ -1,10 +1,6 @@
 # Copyright (c) 2026 Billiepy
 # Licensed under the MIT License.
 # This file is part of SiloXMusic
-#
-# VC Logger plugin — announces if anyone join/leave voicechat.
-# Original concept reference: Silo.
-
 
 import asyncio
 import random
@@ -16,6 +12,7 @@ from pyrogram.types import Message
 
 from anony import app, db, lang, logger
 from anony.helpers import admin_check
+from pyrogram.raw.types import InputPeerChannel, InputPeerChat
 
 
 vc_active_users: Dict[int, Set[int]] = {}
@@ -128,12 +125,24 @@ async def vclogger_command(_, message: Message):
             )
 
 
+async def get_full_chat_call(userbot_client, peer):
+    """Basic groups aur supergroups/channels dono ke liye active call nikalta hai."""
+    if isinstance(peer, InputPeerChannel):
+        full = await userbot_client.invoke(functions.channels.GetFullChannel(channel=peer))
+        return getattr(full.full_chat, "call", None)
+    elif isinstance(peer, InputPeerChat):
+        full = await userbot_client.invoke(functions.messages.GetFullChat(chat_id=peer.chat_id))
+        return getattr(full.full_chat, "call", None)
+    else:
+        logger.warning(f"VC Logger: unsupported peer type: {type(peer).__name__}")
+        return None
+
+
 async def get_group_call_participants(userbot, peer):
     try:
-        full_chat = await userbot.invoke(functions.channels.GetFullChannel(channel=peer))
-        if not hasattr(full_chat.full_chat, "call") or not full_chat.full_chat.call:
+        call = await get_full_chat_call(userbot, peer)
+        if not call:
             return []
-        call = full_chat.full_chat.call
         participants = await userbot.invoke(
             functions.phone.GetGroupParticipants(
                 call=call, ids=[], sources=[], offset="", limit=100
@@ -149,18 +158,25 @@ async def get_group_call_participants(userbot, peer):
             return await get_group_call_participants(userbot, peer)
         if any(x in error_msg for x in ["GROUPCALL_NOT_FOUND", "CALL_NOT_FOUND", "NO_GROUPCALL"]):
             return []
-        logger.error(f"Error fetching participants: {e}")
+        logger.error(f"VC Logger: error fetching participants: {e}")
         return []
 
 
 async def monitor_vc_chat(chat_id):
     userbot_client = await db.get_client(chat_id)
     if not userbot_client:
+        logger.warning(f"VC Logger: no assistant client found for chat {chat_id}")
         return
 
     while chat_id in active_vc_chats and await get_vc_logger_status(chat_id):
         try:
-            peer = await userbot_client.resolve_peer(chat_id)
+            try:
+                peer = await userbot_client.resolve_peer(chat_id)
+            except Exception as e:
+                logger.error(f"VC Logger: resolve_peer failed for chat {chat_id}: {e}")
+                await asyncio.sleep(5)
+                continue
+
             participants_list = await get_group_call_participants(userbot_client, peer)
             new_users = set()
             for p in participants_list:
