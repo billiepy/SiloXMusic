@@ -3,7 +3,7 @@
 # This file is part of AnonXMusic
 #
 # VC Logger plugin — announces jab koi voice chat mein join/leave kare.
-# Original concept reference: Silo
+# Original concept reference: Silooo.
 
 
 import asyncio
@@ -69,6 +69,20 @@ async def get_vc_logger_status(chat_id: int) -> bool:
         logger.error(f"Error getting VC logger status: {e}")
 
     return False
+
+
+async def toggle_vc_logger(chat_id: int) -> bool:
+    """Enable/disable VC logger for a chat. Returns the new status."""
+    current = await get_vc_logger_status(chat_id)
+    new_status = not current
+    vc_logging_status[chat_id] = new_status
+    await save_vc_logger_status(chat_id, new_status)
+    if new_status:
+        asyncio.create_task(check_and_monitor_vc(chat_id))
+    else:
+        active_vc_chats.discard(chat_id)
+        vc_active_users.pop(chat_id, None)
+    return new_status
 
 
 @app.on_message(filters.command("vclogger") & filters.group & ~app.bl_users)
@@ -137,7 +151,7 @@ async def get_group_call_participants(userbot, peer):
 
 
 async def monitor_vc_chat(chat_id):
-    userbot_client = await db.get_assistant(chat_id)
+    userbot_client = await db.get_client(chat_id)
     if not userbot_client:
         return
 
@@ -174,7 +188,7 @@ async def monitor_vc_chat(chat_id):
 async def check_and_monitor_vc(chat_id):
     if not await get_vc_logger_status(chat_id):
         return
-    userbot_client = await db.get_assistant(chat_id)
+    userbot_client = await db.get_client(chat_id)
     if not userbot_client:
         return
     try:
@@ -241,4 +255,4 @@ def to_small_caps(text):
 
 # Bot start hote hi purani enabled chats ke liye monitoring resume ho jaati hai
 asyncio.create_task(load_vc_logger_status())
-  
+                    
